@@ -3,7 +3,7 @@ name: Daily Morning Digest
 on:
   schedule:
     # 7:00 AM PDT (UTC-7) is 14:00 UTC
-    - cron: '10 5 * * *'
+    - cron: '0 15 * * *'
   # Allows manual triggering from the GitHub Actions web interface
   workflow_dispatch:
 
