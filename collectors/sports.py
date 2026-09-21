@@ -2,94 +2,72 @@ from datetime import datetime, timedelta
 import zoneinfo
 import requests
 
-TIMEZONE = zoneinfo.ZoneInfo("America/Los_Angeles")
+def get_team_summary(sport: str, league: str, team_name: str) -> str:
+    """
+    Fetches yesterday's result and today's schedule for a team using single-date queries.
+    """
+    tz = zoneinfo.ZoneInfo("America/Los_Angeles")
+    now = datetime.now(tz)
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y%m%d")
+    today_str = now.strftime("%Y%m%d")
 
-TRACKED_TEAMS = [
-    {
-        "name": "Dodgers",
-        "sport": "baseball",
-        "league": "mlb",
-    },
-    {
-        "name": "Lakers",
-        "sport": "basketball",
-        "league": "nba",
-    },
-]
+    base_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-def format_game(event: dict) -> str:
-    """Formats an ESPN event into a clean line item."""
-    competition = event["competitions"][0]
-    status_type = competition["status"]["type"]["name"]  # STATUS_FINAL, STATUS_SCHEDULED, STATUS_IN_PROGRESS
-    status_detail = competition["status"]["type"]["detail"]
-    competitors = competition["competitors"]
+    recent_game_text = None
+    upcoming_game_text = None
 
-    # ESPN typically puts home team at index 0, away at index 1
-    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
-    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
-
-    home_name = home["team"]["shortDisplayName"]
-    away_name = away["team"]["shortDisplayName"]
-
-    if status_type == "STATUS_FINAL":
-        home_score = home.get("score", "0")
-        away_score = away.get("score", "0")
-        return f"FINAL: {away_name} {away_score} @ {home_name} {home_score}"
-
-    elif status_type == "STATUS_IN_PROGRESS":
-        home_score = home.get("score", "0")
-        away_score = away.get("score", "0")
-        return f"LIVE: {away_name} {away_score} @ {home_name} {home_score} ({status_detail})"
-
-    else:
-        # Scheduled game - parse start time into local Pacific time
-        start_utc = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-        start_local = start_utc.astimezone(TIMEZONE).strftime("%I:%M %p PT")
-        return f"TODAY: {away_name} @ {home_name} ({start_local})"
-
-def get_team_digest(sport: str, league: str, team_keyword: str) -> list[str]:
-    """Fetches yesterday and today's games for a specific team."""
-    now = datetime.now(TIMEZONE)
-    yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
-    today = now.strftime("%Y%m%d")
-    date_range = f"{yesterday}-{today}"
-
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
-    params = {"dates": date_range, "limit": 100}
-
+    # 1. Check Yesterday's Score
     try:
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
-        events = res.json().get("events", [])
-    except Exception as e:
-        return [f"Error checking {team_keyword}: {e}"]
+        res_yest = requests.get(f"{base_url}?dates={yesterday_str}", headers=headers, timeout=10)
+        if res_yest.ok:
+            data = res_yest.json()
+            for event in data.get("events", []):
+                if team_name.lower() in event.get("name", "").lower():
+                    # Parse final score
+                    comp = event["competitions"][0]
+                    t1 = comp["competitors"][0]
+                    t2 = comp["competitors"][1]
+                    status = comp.get("status", {}).get("type", {}).get("description", "Final")
+                    recent_game_text = f"Yesterday: {t1['team']['shortDisplayName']} {t1.get('score', '')} - {t2['team']['shortDisplayName']} {t2.get('score', '')} ({status})"
+                    break
+    except Exception:
+        pass
 
-    team_updates = []
-    for event in events:
-        name = event.get("name", "")
-        if team_keyword.lower() in name.lower():
-            team_updates.append(format_game(event))
+    # 2. Check Today's Game / Status
+    try:
+        res_today = requests.get(f"{base_url}?dates={today_str}", headers=headers, timeout=10)
+        if res_today.ok:
+            data = res_today.json()
+            for event in data.get("events", []):
+                if team_name.lower() in event.get("name", "").lower():
+                    comp = event["competitions"][0]
+                    status_desc = comp.get("status", {}).get("type", {}).get("description", "Scheduled")
+                    
+                    if "Final" in status_desc:
+                        t1 = comp["competitors"][0]
+                        t2 = comp["competitors"][1]
+                        upcoming_game_text = f"Today: {t1['team']['shortDisplayName']} {t1.get('score', '')} - {t2['team']['shortDisplayName']} {t2.get('score', '')} (Final)"
+                    else:
+                        start_time = comp.get("status", {}).get("type", {}).get("shortDetail", "Today")
+                        upcoming_game_text = f"Today: vs {event.get('shortName', team_name)} ({start_time})"
+                    break
+    except Exception:
+        pass
 
-    if not team_updates:
-        return [f"No game yesterday or today (Off Day / Offseason)"]
+    # Combine status
+    if upcoming_game_text:
+        return f"{recent_game_text} | {upcoming_game_text}" if recent_game_text else upcoming_game_text
+    if recent_game_text:
+        return f"{recent_game_text} | No game scheduled today"
+    
+    return "Off-season / No games scheduled"
 
-    return team_updates
-
-def get_sports_report() -> dict[str, list[str]]:
-    """Returns aggregated reports for both Lakers and Dodgers."""
-    report = {}
-    for team in TRACKED_TEAMS:
-        report[team["name"]] = get_team_digest(
-            sport=team["sport"],
-            league=team["league"],
-            team_keyword=team["name"]
-        )
-    return report
+def get_sports_report() -> dict:
+    return {
+        "Dodgers": [get_team_summary("baseball", "mlb", "Dodgers")],
+        "Lakers": [get_team_summary("basketball", "nba", "Lakers")],
+    }
 
 if __name__ == "__main__":
-    print("Testing Sports Collector...\n")
-    results = get_sports_report()
-    for team, updates in results.items():
-        print(f"**{team}**")
-        for line in updates:
-            print(f"  • {line}")
+    print(get_sports_report())
